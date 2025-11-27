@@ -136,19 +136,33 @@ async function extractDataWithClaude(text) {
       'https://api.anthropic.com/v1/messages',
       {
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+        max_tokens: 1500,
         messages: [
           {
             role: 'user',
-            content: `Extract bank transfer information from the following text. Return ONLY a valid JSON object with these fields (use null if not found):
-- amount (number, without currency symbols or dots/commas - just the raw number)
-- cuit (string, the CUIT/CUIL number)
-- recipient_name (string)
-- date (string in format DD/MM/YYYY)
-- transaction_number (string)
-- cbu (string, the bank account number)
+            content: `Extract ALL bank transfer information from the following text. Return ONLY a valid JSON object with these fields (use null if not found):
 
-If this is not a bank transfer message, return null.
+- time (string, transaction time in HH:MM:SS format if available)
+- date (string, transaction date in DD/MM/YYYY format)
+- amount (number, the importe/amount without currency symbols, dots, or commas - just the raw number)
+- transaction_number (string, número de transacción)
+- sender_name (string, name from "Titular" field)
+- sender_cuit (string, CUIT number from "Titular" field, just the numbers)
+- sender_account (string, Cuenta a debitar)
+- recipient_name (string, name from "Titular cuenta destino" field)
+- recipient_cuit (string, CUIT/CUIL/DNI from "Titular cuenta destino" field, just the numbers)
+- recipient_cbu (string, Cuenta destino / CBU number)
+- recipient_alias (string, Alias if present)
+- recipient_dni (string, DNI if present separately, just the numbers)
+- accreditation_date (string, Fecha de acreditación in DD/MM/YYYY format)
+- reference (string, Referencia field)
+- motive (string, Motivo field)
+
+Important notes:
+- For amounts: remove all dots, commas, and currency symbols. Example: "$72.100.000,00" becomes 72100000
+- For CUIT/DNI: extract just the numbers. Example: "20190314716" or "18367622"
+- Look for Alias in the text (e.g., "Alias: Seto1967")
+- If the text is not a bank transfer, return null
 
 Text:
 ${text}
@@ -178,8 +192,8 @@ Return ONLY the JSON object, nothing else. Do not include any markdown formattin
 
     const data = JSON.parse(jsonText);
     
-    // Validate that we have at least amount and CUIT
-    if (data && (data.amount || data.cuit)) {
+    // Validate that we have at least some transfer data
+    if (data && (data.amount || data.transaction_number || data.sender_name || data.recipient_name)) {
       return data;
     }
     
@@ -205,18 +219,27 @@ async function saveToGoogleSheets(data) {
     const sheets = google.sheets({ version: 'v4', auth });
 
     const values = [[
-      new Date().toISOString(),
+      new Date().toISOString(), // Timestamp when received
+      data.time || '',
       data.date || '',
       data.amount || '',
-      data.cuit || '',
-      data.recipient_name || '',
       data.transaction_number || '',
-      data.cbu || ''
+      data.sender_name || '',
+      data.sender_cuit || '',
+      data.sender_account || '',
+      data.recipient_name || '',
+      data.recipient_cuit || '',
+      data.recipient_cbu || '',
+      data.recipient_alias || '',
+      data.recipient_dni || '',
+      data.accreditation_date || '',
+      data.reference || '',
+      data.motive || ''
     ]];
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEETS_ID,
-      range: 'Sheet1!A:G',
+      range: 'Sheet1!A:P',
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
@@ -239,3 +262,10 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
+```
+
+**Now update your Google Sheet headers to match:**
+
+Row 1 should have these columns (A through P):
+```
+Timestamp | Time | Date | Amount | Transaction # | Sender Name | Sender CUIT | Sender Account | Recipient Name | Recipient CUIT | Recipient CBU | Alias | DNI | Accreditation Date | Reference | Motive
