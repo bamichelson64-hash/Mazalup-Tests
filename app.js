@@ -11,7 +11,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'mazalup_verify_token_2025';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
-const GOOGLE_SERVICE_ACCOUNT = process.env.GOOGLE_SERVICE_ACCOUNT; // JSON string
+const GOOGLE_SERVICE_ACCOUNT = process.env.GOOGLE_SERVICE_ACCOUNT;
 
 // Webhook verification endpoint
 app.get('/webhook', (req, res) => {
@@ -34,6 +34,8 @@ app.post('/webhook', async (req, res) => {
 
     // Respond immediately to Meta
     res.sendStatus(200);
+
+    console.log('Webhook received:', new Date().toISOString());
 
     // Check if it's a WhatsApp message
     if (body.object === 'whatsapp_business_account') {
@@ -62,14 +64,16 @@ async function processMessage(message, value) {
     // Handle different message types
     if (message.type === 'text') {
       extractedText = message.text.body;
+      console.log('Text message received:', extractedText);
     } else if (message.type === 'document' && message.document.mime_type === 'application/pdf') {
+      console.log('PDF document received, downloading...');
       // Download and extract PDF
       const pdfUrl = await getMediaUrl(message.document.id);
       const pdfBuffer = await downloadMedia(pdfUrl);
       const pdfData = await pdfParse(pdfBuffer);
       extractedText = pdfData.text;
+      console.log('PDF text extracted');
     } else if (message.type === 'image') {
-      // For images, we'd need OCR - skipping for now
       console.log('Image messages not yet supported');
       return;
     } else {
@@ -78,12 +82,14 @@ async function processMessage(message, value) {
     }
 
     // Extract data using Claude
+    console.log('Calling Claude API...');
     const extractedData = await extractDataWithClaude(extractedText);
 
     if (extractedData) {
+      console.log('Data extracted:', extractedData);
       // Save to Google Sheets
       await saveToGoogleSheets(extractedData);
-      console.log('Data saved successfully:', extractedData);
+      console.log('Data saved successfully to Google Sheets');
     } else {
       console.log('No transfer data found in message');
     }
@@ -135,7 +141,7 @@ async function extractDataWithClaude(text) {
           {
             role: 'user',
             content: `Extract bank transfer information from the following text. Return ONLY a valid JSON object with these fields (use null if not found):
-- amount (number, without currency symbols or dots/commas)
+- amount (number, without currency symbols or dots/commas - just the raw number)
 - cuit (string, the CUIT/CUIL number)
 - recipient_name (string)
 - date (string in format DD/MM/YYYY)
@@ -147,7 +153,7 @@ If this is not a bank transfer message, return null.
 Text:
 ${text}
 
-Return ONLY the JSON object, nothing else.`
+Return ONLY the JSON object, nothing else. Do not include any markdown formatting.`
           }
         ]
       },
@@ -161,6 +167,7 @@ Return ONLY the JSON object, nothing else.`
     );
 
     const claudeResponse = response.data.content[0].text.trim();
+    console.log('Claude response:', claudeResponse);
     
     // Remove markdown code blocks if present
     const jsonText = claudeResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -185,6 +192,8 @@ Return ONLY the JSON object, nothing else.`
 
 async function saveToGoogleSheets(data) {
   try {
+    console.log('Saving to Google Sheets...');
+    
     // Parse the service account credentials
     const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT);
     
@@ -196,7 +205,7 @@ async function saveToGoogleSheets(data) {
     const sheets = google.sheets({ version: 'v4', auth });
 
     const values = [[
-      new Date().toISOString(), // Timestamp
+      new Date().toISOString(),
       data.date || '',
       data.amount || '',
       data.cuit || '',
@@ -207,14 +216,17 @@ async function saveToGoogleSheets(data) {
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEETS_ID,
-      range: 'Sheet1!A:G', // Adjust sheet name if needed
+      range: 'Sheet1!A:G',
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
 
     console.log('Successfully appended to Google Sheets');
   } catch (error) {
-    console.error('Error saving to Google Sheets:', error);
+    console.error('Error saving to Google Sheets:', error.message);
+    if (error.response) {
+      console.error('Error details:', error.response.data);
+    }
     throw error;
   }
 }
@@ -227,13 +239,3 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
-```
-
-## File 3: `.env.example`
-```
-PORT=3000
-VERIFY_TOKEN=mazalup_verify_token_2025
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
-WHATSAPP_TOKEN=your_whatsapp_access_token_here
-GOOGLE_SHEETS_ID=your_google_sheet_id_here
-GOOGLE_SERVICE_ACCOUNT={"type":"service_account","project_id":"..."}
