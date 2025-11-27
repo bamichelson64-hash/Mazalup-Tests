@@ -1,0 +1,15 @@
+ {
+  "name": "whatsapp-transfer-tracker",
+  "version": "1.0.0",
+  "description": "WhatsApp webhook to track bank transfers",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "pdf-parse": "^1.1.1",
+    "googleapis": "^128.0.0"
+  }
+}
