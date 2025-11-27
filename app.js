@@ -263,9 +263,3 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
 ```
-
-**Now update your Google Sheet headers to match:**
-
-Row 1 should have these columns (A through P):
-```
-Timestamp | Time | Date | Amount | Transaction # | Sender Name | Sender CUIT | Sender Account | Recipient Name | Recipient CUIT | Recipient CBU | Alias | DNI | Accreditation Date | Reference | Motive
