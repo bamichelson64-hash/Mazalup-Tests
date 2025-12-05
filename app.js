@@ -77,8 +77,16 @@ async function processMessage(message, value) {
 
     if (extractedData) {
       console.log('Data extracted:', extractedData);
-      await saveToGoogleSheets(extractedData);
-      console.log('Data saved successfully to Google Sheets');
+      
+      if (Array.isArray(extractedData)) {
+        for (const transfer of extractedData) {
+          await saveToGoogleSheets(transfer);
+        }
+        console.log(`Saved ${extractedData.length} transfers to Google Sheets`);
+      } else {
+        await saveToGoogleSheets(extractedData);
+        console.log('Data saved successfully to Google Sheets');
+      }
     } else {
       console.log('No transfer data found in message');
     }
@@ -125,38 +133,80 @@ async function extractDataWithClaude(text) {
       'https://api.anthropic.com/v1/messages',
       {
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1500,
+        max_tokens: 3000,
         messages: [
           {
             role: 'user',
-            content: `Extract ALL bank transfer information from the following text. Return ONLY a valid JSON object with these fields (use null if not found):
+            content: `You are extracting Argentine bank transfer information. Be VERY careful with formatting and multiple transfers.
 
-- time (string, transaction time in HH:MM:SS format if available)
-- date (string, transaction date in DD/MM/YYYY format)
-- amount (number, the importe/amount without currency symbols, dots, or commas - just the raw number)
-- transaction_number (string, número de transacción)
-- sender_name (string, name from "Titular" field)
-- sender_cuit (string, CUIT number from "Titular" field, just the numbers)
-- sender_account (string, Cuenta a debitar)
-- recipient_name (string, name from "Titular cuenta destino" field)
-- recipient_cuit (string, CUIT/CUIL/DNI from "Titular cuenta destino" field, just the numbers)
-- recipient_cbu (string, Cuenta destino / CBU number)
-- recipient_alias (string, Alias if present)
-- recipient_dni (string, DNI if present separately, just the numbers)
-- accreditation_date (string, Fecha de acreditación in DD/MM/YYYY format)
-- reference (string, Referencia field)
-- motive (string, Motivo field)
+CRITICAL RULES:
 
-Important notes:
-- For amounts: remove all dots, commas, and currency symbols. Example: "$72.100.000,00" becomes 72100000
-- For CUIT/DNI: extract just the numbers. Example: "20190314716" or "18367622"
-- Look for Alias in the text (e.g., "Alias: Seto1967")
-- If the text is not a bank transfer, return null
+1. AMOUNT PARSING:
+   - "1m" or "1M" → 1000000
+   - "8m" → 8000000
+   - "2.5m" → 2500000
+   - "$8,765,000" → 8765000 (remove $ , and .)
+   - "$2.500.000m" → 2500000
+   - Always return raw number only
+
+2. MULTIPLE TRANSFERS:
+   - If message says "Girar en X giros" or has numbered amounts like:
+     1) 8.765.000
+     2) 7.623.000
+     3) 7.745.753
+   - Create SEPARATE transfer objects for EACH amount
+   - Each should have the SAME account details but DIFFERENT amounts
+   - Return as JSON ARRAY: [transfer1, transfer2, transfer3]
+
+3. TIPO DE GIRO (IMPORTANT):
+   - If contains "factura" or "con factura" → "Con Factura"
+   - Otherwise → "Barrani" (default)
+   - NEVER use both - it's either "Barrani" OR "Con Factura", not both
+
+4. CUIT/DNI: Extract only numbers, remove dashes/spaces/dots
+   - "30-71429017-3" → "3071429017"
+   - "20-45.317.732-8" → "20453177328"
+
+5. NAME PRIORITY:
+   - Look for: Titular, Razón Social, or just a name
+   - If no name, use Alias as identifier
+
+6. BANK: Extract bank name (Galicia, BBVA, Santander, Provincia, Macro, etc.)
+
+For SINGLE transfer, return JSON object:
+{
+  "tipo_giro": "Barrani" or "Con Factura" (default "Barrani"),
+  "client_name": string,
+  "bank": string,
+  "amount": number,
+  "alias": string,
+  "sucursal": string,
+  "time": string,
+  "date": string,
+  "transaction_number": string,
+  "sender_name": string,
+  "sender_cuit": string,
+  "sender_account": string,
+  "recipient_cbu": string,
+  "recipient_dni": string,
+  "accreditation_date": string,
+  "reference": string,
+  "motive": string,
+  "recipient_name": string,
+  "recipient_cuit": string
+}
+
+For MULTIPLE transfers, return JSON ARRAY:
+[
+  { ...transfer1 with amount1... },
+  { ...transfer2 with amount2... },
+  { ...transfer3 with amount3... }
+]
 
 Text:
 ${text}
 
-Return ONLY the JSON object, nothing else. Do not include any markdown formatting.`
+Return ONLY valid JSON (object or array), no markdown.`
           }
         ]
       },
@@ -180,8 +230,23 @@ Return ONLY the JSON object, nothing else. Do not include any markdown formattin
 
     const data = JSON.parse(jsonText);
     
-    if (data && (data.amount || data.transaction_number || data.sender_name || data.recipient_name)) {
-      return data;
+    const ensureSingleType = (transfer) => {
+      if (!transfer.tipo_giro || transfer.tipo_giro === 'null') {
+        transfer.tipo_giro = 'Barrani';
+      }
+      if (transfer.tipo_giro && transfer.tipo_giro.includes('Con Factura')) {
+        transfer.tipo_giro = 'Con Factura';
+      } else {
+        transfer.tipo_giro = 'Barrani';
+      }
+      return transfer;
+    };
+    
+    if (Array.isArray(data)) {
+      return data.filter(t => t.amount || t.recipient_name || t.client_name)
+                 .map(ensureSingleType);
+    } else if (data && (data.amount || data.recipient_name || data.client_name)) {
+      return ensureSingleType(data);
     }
     
     return null;
@@ -204,28 +269,33 @@ async function saveToGoogleSheets(data) {
 
     const sheets = google.sheets({ version: 'v4', auth });
 
+    // REORGANIZED COLUMN ORDER
     const values = [[
-      new Date().toISOString(),
-      data.time || '',
-      data.date || '',
-      data.amount || '',
-      data.transaction_number || '',
-      data.sender_name || '',
-      data.sender_cuit || '',
-      data.sender_account || '',
-      data.recipient_name || '',
-      data.recipient_cuit || '',
-      data.recipient_cbu || '',
-      data.recipient_alias || '',
-      data.recipient_dni || '',
-      data.accreditation_date || '',
-      data.reference || '',
-      data.motive || ''
+      new Date().toISOString(),         // A: Timestamp
+      data.tipo_giro || '',             // B: Tipo de Giro
+      data.client_name || '',           // C: Client Name
+      data.bank || '',                  // D: Bank
+      data.amount || '',                // E: Amount (moved up)
+      data.alias || '',                 // F: Alias (moved up)
+      data.sucursal || '',              // G: Sucursal
+      data.time || '',                  // H: Time
+      data.date || '',                  // I: Date
+      data.transaction_number || '',    // J: Transaction #
+      data.sender_name || '',           // K: Sender Name
+      data.sender_cuit || '',           // L: Sender CUIT
+      data.sender_account || '',        // M: Sender Account
+      data.recipient_cbu || '',         // N: Recipient CBU
+      data.recipient_dni || '',         // O: Recipient DNI
+      data.accreditation_date || '',    // P: Accreditation Date
+      data.reference || '',             // Q: Reference
+      data.motive || '',                // R: Motive
+      data.recipient_name || '',        // S: Recipient Name (moved to end)
+      data.recipient_cuit || ''         // T: Recipient CUIT (moved to end)
     ]];
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEETS_ID,
-      range: 'Sheet1!A:P',
+      range: 'Sheet1!A:T',
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
@@ -247,3 +317,27 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
+```
+
+**Update your Google Sheet headers (Row 1) to match new order:**
+```
+A: Timestamp
+B: Tipo de Giro
+C: Client Name
+D: Bank
+E: Amount
+F: Alias
+G: Sucursal
+H: Time
+I: Date
+J: Transaction #
+K: Sender Name
+L: Sender CUIT
+M: Sender Account
+N: Recipient CBU
+O: Recipient DNI
+P: Accreditation Date
+Q: Reference
+R: Motive
+S: Recipient Name
+T: Recipient CUIT
